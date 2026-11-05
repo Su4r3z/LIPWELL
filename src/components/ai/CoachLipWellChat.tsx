@@ -95,7 +95,6 @@ export function CoachLipWellChat() {
   // Controle de assinatura
   const [subscriptionStatus, setSubscriptionStatus] = useState<string>('trial');
   const [usageCount, setUsageCount] = useState(0);
-  const [usageId, setUsageId] = useState<string | null>(null);
 
   const [messages, setMessages] = useState<Message[]>([
     {
@@ -135,18 +134,8 @@ export function CoachLipWellChat() {
           .eq('usage_date', today)
           .maybeSingle();
 
-        if (usageData) {
-          setUsageId(usageData.id);
-          setUsageCount(usageData.coach_messages_count ?? 0);
-        } else {
-          const { data: newUsage } = await supabase
-            .from('ai_usage')
-            .insert({ user_id: user.id, usage_date: today, coach_messages_count: 0 })
-            .select('id')
-            .single();
-          if (newUsage) setUsageId(newUsage.id);
-          setUsageCount(0);
-        }
+        // Somente leitura: quem incrementa a cota é o servidor (/api/ai/chat)
+        setUsageCount(usageData?.coach_messages_count ?? 0);
       }
     })();
   }, [isOpen]);
@@ -189,6 +178,11 @@ export function CoachLipWellChat() {
       });
 
       const data = await res.json();
+      if (res.status === 429 && data.code === 'LIMIT_REACHED') {
+        setUsageCount(data.limit ?? data.used ?? dailyLimit ?? 3);
+        setMessages(prev => prev.slice(0, -1));
+        return;
+      }
       if (!res.ok) throw new Error(data.error ?? `Status ${res.status}`);
 
       setMessages(prev => [
@@ -196,15 +190,8 @@ export function CoachLipWellChat() {
         { id: `msg-${Date.now() + 1}`, role: 'assistant', content: data.reply },
       ]);
 
-      // Incrementa uso no banco (não-premium)
-      if (!isPremium && usageId) {
-        const newCount = usageCount + 1;
-        setUsageCount(newCount);
-        await supabase
-          .from('ai_usage')
-          .update({ coach_messages_count: newCount })
-          .eq('id', usageId);
-      }
+      // Contador vem do servidor (cota já consumida lá)
+      if (typeof data.usage?.used === 'number') setUsageCount(data.usage.used);
     } catch (err) {
       const msg = (err as Error).message || 'Erro desconhecido';
       setError(msg);

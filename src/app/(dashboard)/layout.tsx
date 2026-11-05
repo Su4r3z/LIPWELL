@@ -10,7 +10,13 @@ import { PaywallModal } from '@/components/dashboard/PaywallModal';
 interface Profile {
   full_name: string | null;
   subscription_status: string | null;
-  trial_end_date: string | null;
+  trial_started_at: string | null;
+}
+
+// Mesma regra do banco (effective_plan): trial dura 7 dias
+const TRIAL_DAYS = 7;
+function trialEndFrom(startedAt: string): Date {
+  return new Date(new Date(startedAt).getTime() + TRIAL_DAYS * 24 * 60 * 60 * 1000);
 }
 
 export default function DashboardLayout({ children }: { children: ReactNode }) {
@@ -26,7 +32,7 @@ export default function DashboardLayout({ children }: { children: ReactNode }) {
 
       const { data } = await supabase
         .from('profiles')
-        .select('full_name, subscription_status, trial_end_date')
+        .select('full_name, subscription_status, trial_started_at')
         .eq('id', user.id)
         .single();
 
@@ -34,8 +40,8 @@ export default function DashboardLayout({ children }: { children: ReactNode }) {
         setProfile(data);
 
         // Checa se o trial expirou
-        if (data.subscription_status === 'trialing' && data.trial_end_date) {
-          const trialEnd = new Date(data.trial_end_date);
+        if (data.subscription_status === 'trial' && data.trial_started_at) {
+          const trialEnd = trialEndFrom(data.trial_started_at);
           const now = new Date();
           if (now > trialEnd) {
             setIsTrialExpired(true);
@@ -52,8 +58,8 @@ export default function DashboardLayout({ children }: { children: ReactNode }) {
 
   // Calcula dias restantes de trial
   const trialDaysLeft = (() => {
-    if (!profile?.trial_end_date || profile.subscription_status !== 'trialing') return null;
-    const trialEnd = new Date(profile.trial_end_date);
+    if (!profile?.trial_started_at || profile.subscription_status !== 'trial') return null;
+    const trialEnd = trialEndFrom(profile.trial_started_at);
     const now = new Date();
     const diff = Math.ceil((trialEnd.getTime() - now.getTime()) / (1000 * 60 * 60 * 24));
     return diff > 0 ? diff : 0;

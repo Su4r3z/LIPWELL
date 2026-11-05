@@ -6,7 +6,9 @@ export async function GET(request: Request) {
   const { searchParams, origin } = new URL(request.url)
   const code = searchParams.get('code')
   // Após clicar no link do e-mail, enviaremos por padrão para o Onboarding
-  const next = searchParams.get('next') ?? '/onboarding'
+  // Só aceita caminhos internos: "?next=@evil.com" ou "//evil.com" virariam redirect externo
+  const rawNext = searchParams.get('next') ?? '/onboarding'
+  const next = rawNext.startsWith('/') && !rawNext.startsWith('//') && !rawNext.includes('\\') ? rawNext : '/onboarding'
 
   if (code) {
     const cookieStore = await cookies()

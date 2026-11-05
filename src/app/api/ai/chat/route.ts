@@ -1,13 +1,28 @@
 import { NextRequest, NextResponse } from 'next/server';
-import groq from '@/lib/groq';
+import { z } from 'zod';
+import { getGroq } from '@/lib/groq';
+import { requireAiQuota } from '@/lib/ai-guard';
+
+const ChatSchema = z.object({
+  message: z.string().trim().min(1).max(2000),
+  context: z.string().max(8000).optional(),
+  // Só aceita user/assistant: impede injetar mensagens 'system' pelo navegador
+  history: z.array(z.object({
+    role: z.enum(['user', 'assistant']),
+    content: z.string().max(4000),
+  })).max(20).optional(),
+});
 
 export async function POST(req: NextRequest) {
   try {
-    const { message, context, history } = await req.json();
-
-    if (!message) {
-      return NextResponse.json({ error: 'Mensagem é obrigatória' }, { status: 400 });
+    const parsed = ChatSchema.safeParse(await req.json().catch(() => null));
+    if (!parsed.success) {
+      return NextResponse.json({ error: 'Mensagem inválida' }, { status: 400 });
     }
+    const { message, context, history } = parsed.data;
+
+    const guard = await requireAiQuota('coach');
+    if (guard.response) return guard.response;
 
     const systemPrompt = `Você é a LipWell, uma coach virtual especializada em lipedema. Você tem acesso aos dados reais do diário de saúde da usuária.
 
@@ -32,8 +47,7 @@ DIRETRIZES DE ALIMENTAÇÃO E SUPLEMENTAÇÃO:
 
 Se a usuária perguntar algo fora do tema de saúde/lipedema, redirecione gentilmente pro foco do app.`;
 
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const messages: any[] = [
+    const messages: { role: 'system' | 'user' | 'assistant'; content: string }[] = [
       { role: 'system', content: systemPrompt },
     ];
 
@@ -50,14 +64,14 @@ Se a usuária perguntar algo fora do tema de saúde/lipedema, redirecione gentil
     }
 
     // Histórico das últimas mensagens (max 10)
-    if (history && Array.isArray(history)) {
+    if (history) {
       messages.push(...history.slice(-10));
     }
 
     // Mensagem atual
     messages.push({ role: 'user', content: message });
 
-    const completion = await groq.chat.completions.create({
+    const completion = await getGroq().chat.completions.create({
       model: 'llama-3.1-8b-instant',
       messages,
       max_tokens: 512,
@@ -68,7 +82,7 @@ Se a usuária perguntar algo fora do tema de saúde/lipedema, redirecione gentil
     const reply = completion.choices[0]?.message?.content
       || 'Desculpe, não consegui processar sua pergunta. Pode tentar de novo? 🌸';
 
-    return NextResponse.json({ reply });
+    return NextResponse.json({ reply, usage: { used: guard.quota.used, limit: guard.quota.limit } });
 
   } catch (error: unknown) {
     const err = error as { status?: number; message?: string };

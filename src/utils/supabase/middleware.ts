@@ -34,6 +34,7 @@ export async function updateSession(request: NextRequest) {
     request.nextUrl.pathname.startsWith('/dashboard') || 
     request.nextUrl.pathname.startsWith('/diary') || 
     request.nextUrl.pathname.startsWith('/settings') || 
+    request.nextUrl.pathname.startsWith('/plans') || 
     request.nextUrl.pathname === '/onboarding';
 
   if (!user && isProtectedRoute) {

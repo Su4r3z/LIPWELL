@@ -1,15 +1,25 @@
 import { NextRequest, NextResponse } from 'next/server';
-import groq from '@/lib/groq';
+import { z } from 'zod';
+import { getGroq } from '@/lib/groq';
+import { requireAiQuota } from '@/lib/ai-guard';
+
+const FoodSchema = z.object({
+  foodName: z.string().trim().min(1).max(120),
+  category: z.string().trim().max(40).optional(),
+});
 
 export async function POST(req: NextRequest) {
   try {
-    const { foodName, category } = await req.json();
-
-    if (!foodName) {
-      return NextResponse.json({ error: 'Nome do alimento é obrigatório' }, { status: 400 });
+    const input = FoodSchema.safeParse(await req.json().catch(() => null));
+    if (!input.success) {
+      return NextResponse.json({ error: 'Nome do alimento inválido' }, { status: 400 });
     }
+    const { foodName, category } = input.data;
 
-    const completion = await groq.chat.completions.create({
+    const guard = await requireAiQuota('food');
+    if (guard.response) return guard.response;
+
+    const completion = await getGroq().chat.completions.create({
       model: 'llama-3.1-8b-instant',
       messages: [
         {
@@ -18,7 +28,7 @@ export async function POST(req: NextRequest) {
         },
         {
           role: 'user',
-          content: `O alimento "${foodName}" (categoria: ${category || 'geral'}) é anti-inflamatório e adequado para uma dieta de controle de lipedema?`
+          content: `O alimento ${JSON.stringify(foodName)} (categoria: ${category || 'geral'}) é anti-inflamatório e adequado para uma dieta de controle de lipedema?`
         }
       ],
       max_tokens: 150,
@@ -30,8 +40,8 @@ export async function POST(req: NextRequest) {
     const parsed = JSON.parse(content);
 
     return NextResponse.json({
-      is_anti_inflammatory: parsed.is_anti_inflammatory ?? false,
-      reason: parsed.reason ?? 'Não foi possível classificar.',
+      is_anti_inflammatory: parsed.is_anti_inflammatory === true,
+      reason: typeof parsed.reason === 'string' ? parsed.reason.slice(0, 300) : 'Não foi possível classificar.',
     });
 
   } catch (error: unknown) {

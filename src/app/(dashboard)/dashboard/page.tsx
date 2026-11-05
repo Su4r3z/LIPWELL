@@ -226,6 +226,9 @@ Refeições:\n${mealsSummary}`;
       setReport(data.report);
       setShowReport(true);
       if (saved) setReportHistory(prev => [saved, ...prev]);
+    } else if (res.status === 429) {
+      // Cota validada no servidor
+      setShowTrialLimitModal(true);
     }
     setIsReportLoading(false);
   };

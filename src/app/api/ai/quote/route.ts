@@ -1,5 +1,7 @@
 import { NextResponse } from 'next/server';
-import groq from '@/lib/groq';
+import { getGroq } from '@/lib/groq';
+
+const CACHE_HEADERS = { 'Cache-Control': 'public, s-maxage=3600, stale-while-revalidate=86400' };
 
 // Cache em memória simples (reseta se o servidor reiniciar)
 let cachedQuote: { text: string; generatedAt: string } | null = null;
@@ -10,10 +12,10 @@ export async function GET() {
 
     // Se já gerou hoje, retorna do cache
     if (cachedQuote && cachedQuote.generatedAt === today) {
-      return NextResponse.json({ quote: cachedQuote.text, cached: true });
+      return NextResponse.json({ quote: cachedQuote.text, cached: true }, { headers: CACHE_HEADERS });
     }
 
-    const completion = await groq.chat.completions.create({
+    const completion = await getGroq().chat.completions.create({
       model: 'llama-3.1-8b-instant',
       messages: [
         {
@@ -32,7 +34,7 @@ export async function GET() {
 
     cachedQuote = { text, generatedAt: today };
 
-    return NextResponse.json({ quote: text, cached: false });
+    return NextResponse.json({ quote: text, cached: false }, { headers: CACHE_HEADERS });
   } catch (err) {
     console.error('[Quote API]', err);
     // Fallback gracioso

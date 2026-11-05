@@ -1,13 +1,20 @@
 import { NextRequest, NextResponse } from 'next/server';
-import groq from '@/lib/groq';
+import { z } from 'zod';
+import { getGroq } from '@/lib/groq';
+import { requireAiQuota } from '@/lib/ai-guard';
+
+const ReportSchema = z.object({ userData: z.string().trim().min(1).max(12000) });
 
 export async function POST(req: NextRequest) {
   try {
-    const { userData } = await req.json();
-
-    if (!userData) {
-      return NextResponse.json({ error: 'Dados são obrigatórios' }, { status: 400 });
+    const input = ReportSchema.safeParse(await req.json().catch(() => null));
+    if (!input.success) {
+      return NextResponse.json({ error: 'Dados inválidos' }, { status: 400 });
     }
+    const { userData } = input.data;
+
+    const guard = await requireAiQuota('report');
+    if (guard.response) return guard.response;
 
     const systemPrompt = `Você é uma especialista em lipedema analisando dados reais do diário de saúde de uma paciente.
 
@@ -32,7 +39,7 @@ REGRAS:
 - Máximo 300 palavras
 - Referencie os números reais dos dados`;
 
-    const completion = await groq.chat.completions.create({
+    const completion = await getGroq().chat.completions.create({
       model: 'llama-3.1-8b-instant',
       messages: [
         { role: 'system', content: systemPrompt },
