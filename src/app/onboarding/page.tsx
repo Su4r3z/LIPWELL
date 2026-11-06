@@ -120,7 +120,7 @@ export default function OnboardingPage() {
         .from("profiles")
         .update({
           phone: phone,
-          dob: dob,
+          dob: dob || null, // "" quebra coluna DATE no Postgres
           lipedema_stage: stage,
           pain_concentration: pain,
           full_name: user.user_metadata?.full_name || "",

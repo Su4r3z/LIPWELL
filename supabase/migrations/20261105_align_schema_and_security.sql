@@ -1,13 +1,25 @@
 -- ============================================================
 -- LipWell — Alinha o schema ao código do app + endurece segurança
--- Rode DEPOIS de 001_initial_schema.sql e 20260415_scope_finalization.sql
--- (Supabase → SQL Editor → cole tudo → Run). É idempotente.
+-- Requer apenas o 001_initial_schema.sql já aplicado (tabela profiles).
+-- Não precisa do 20260415: as tabelas dele são criadas aqui se faltarem.
+-- (Supabase → SQL Editor → cole tudo → Run). É idempotente: pode rodar de novo.
 -- ============================================================
 
 -- ------------------------------------------------------------
 -- 1. PROFILES — colunas que o app usa e constraints compatíveis
 -- ------------------------------------------------------------
 ALTER TABLE public.profiles
+  ADD COLUMN IF NOT EXISTS lipedema_stage TEXT,
+  ADD COLUMN IF NOT EXISTS subscription_status TEXT DEFAULT 'trial',
+  ADD COLUMN IF NOT EXISTS subscription_plan TEXT,
+  ADD COLUMN IF NOT EXISTS trial_start DATE,
+  ADD COLUMN IF NOT EXISTS trial_end DATE,
+  ADD COLUMN IF NOT EXISTS mp_customer_id TEXT,
+  ADD COLUMN IF NOT EXISTS mp_preapproval_id TEXT,
+  ADD COLUMN IF NOT EXISTS ia_chat_count INT DEFAULT 0,
+  ADD COLUMN IF NOT EXISTS ia_chat_month TEXT,
+  ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ DEFAULT NOW(),
+  ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ DEFAULT NOW(),
   ADD COLUMN IF NOT EXISTS phone TEXT,
   ADD COLUMN IF NOT EXISTS dob DATE,
   ADD COLUMN IF NOT EXISTS pain_concentration TEXT,
@@ -28,6 +40,7 @@ ALTER TABLE public.profiles ALTER COLUMN subscription_status SET DEFAULT 'trial'
 
 -- Usuária só pode LER e ATUALIZAR o próprio perfil.
 -- (Antes era FOR ALL: dava pra apagar o perfil e recriar como 'premium'.)
+ALTER TABLE public.profiles ENABLE ROW LEVEL SECURITY;
 DROP POLICY IF EXISTS "own_profile" ON public.profiles;
 DROP POLICY IF EXISTS "profile_select_own" ON public.profiles;
 DROP POLICY IF EXISTS "profile_update_own" ON public.profiles;
@@ -75,6 +88,11 @@ BEGIN
 END;
 $$ LANGUAGE plpgsql SECURITY DEFINER SET search_path = public;
 
+DROP TRIGGER IF EXISTS on_auth_user_created ON auth.users;
+CREATE TRIGGER on_auth_user_created
+  AFTER INSERT ON auth.users
+  FOR EACH ROW EXECUTE FUNCTION public.handle_new_user();
+
 -- Cria perfil para contas que já existiam antes do trigger
 INSERT INTO public.profiles (id, full_name)
 SELECT u.id, COALESCE(u.raw_user_meta_data->>'full_name', 'Nova Usuária')
@@ -84,7 +102,18 @@ ON CONFLICT (id) DO NOTHING;
 -- ------------------------------------------------------------
 -- 2. SUPPLEMENTS — a tabela do 001 não tinha dosage/schedule
 -- ------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS public.supplements (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  user_id UUID NOT NULL REFERENCES public.profiles(id) ON DELETE CASCADE,
+  name TEXT NOT NULL,
+  is_active BOOLEAN DEFAULT TRUE,
+  created_at TIMESTAMPTZ DEFAULT NOW()
+);
+ALTER TABLE public.supplements ENABLE ROW LEVEL SECURITY;
+
 ALTER TABLE public.supplements
+  ADD COLUMN IF NOT EXISTS is_active BOOLEAN DEFAULT TRUE,
+  ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ DEFAULT NOW(),
   ADD COLUMN IF NOT EXISTS dosage TEXT,
   ADD COLUMN IF NOT EXISTS schedule TEXT;
 
@@ -156,10 +185,92 @@ CREATE TABLE IF NOT EXISTS public.custom_foods (
   UNIQUE (user_id, name)
 );
 
+-- Garante as tabelas do script 20260415 caso ele não tenha sido rodado
+CREATE TABLE IF NOT EXISTS public.ai_reports (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  user_id UUID NOT NULL REFERENCES public.profiles(id) ON DELETE CASCADE,
+  created_at TIMESTAMPTZ DEFAULT NOW(),
+  log_date DATE NOT NULL,
+  content TEXT NOT NULL,
+  type TEXT DEFAULT 'weekly'
+);
+CREATE INDEX IF NOT EXISTS idx_ai_reports_user_date ON public.ai_reports(user_id, log_date);
+
+CREATE TABLE IF NOT EXISTS public.ai_usage (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  user_id UUID NOT NULL REFERENCES public.profiles(id) ON DELETE CASCADE,
+  usage_date DATE DEFAULT CURRENT_DATE NOT NULL,
+  coach_messages_count INTEGER DEFAULT 0,
+  UNIQUE(user_id, usage_date)
+);
+CREATE INDEX IF NOT EXISTS idx_ai_usage_user_date ON public.ai_usage(user_id, usage_date);
+
+-- Se alguma dessas tabelas já existia (criada à mão no painel), o CREATE TABLE
+-- acima é ignorado. Garante aqui as colunas que o app usa.
+ALTER TABLE public.daily_logs
+  ADD COLUMN IF NOT EXISTS wake_feeling INT,
+  ADD COLUMN IF NOT EXISTS sleep_quality INT,
+  ADD COLUMN IF NOT EXISTS pain_level INT,
+  ADD COLUMN IF NOT EXISTS pain_locations TEXT[] DEFAULT '{}',
+  ADD COLUMN IF NOT EXISTS swelling_legs INT,
+  ADD COLUMN IF NOT EXISTS mood TEXT,
+  ADD COLUMN IF NOT EXISTS energy_level INT,
+  ADD COLUMN IF NOT EXISTS stress_level INT,
+  ADD COLUMN IF NOT EXISTS pain_comparison TEXT,
+  ADD COLUMN IF NOT EXISTS had_emotional_trigger BOOLEAN,
+  ADD COLUMN IF NOT EXISTS trigger_description TEXT,
+  ADD COLUMN IF NOT EXISTS water_intake_ml INT,
+  ADD COLUMN IF NOT EXISTS exercised BOOLEAN,
+  ADD COLUMN IF NOT EXISTS exercise_type TEXT,
+  ADD COLUMN IF NOT EXISTS exercise_minutes INT,
+  ADD COLUMN IF NOT EXISTS exercise_intensity TEXT,
+  ADD COLUMN IF NOT EXISTS used_compression BOOLEAN,
+  ADD COLUMN IF NOT EXISTS compression_minutes INT,
+  ADD COLUMN IF NOT EXISTS did_massage BOOLEAN,
+  ADD COLUMN IF NOT EXISTS massage_minutes INT,
+  ADD COLUMN IF NOT EXISTS elevated_legs BOOLEAN,
+  ADD COLUMN IF NOT EXISTS elevated_legs_minutes INT,
+  ADD COLUMN IF NOT EXISTS taken_supplements JSONB DEFAULT '[]'::jsonb,
+  ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ DEFAULT NOW();
+
+ALTER TABLE public.meal_logs
+  ADD COLUMN IF NOT EXISTS food_items JSONB NOT NULL DEFAULT '[]'::jsonb,
+  ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ DEFAULT NOW();
+
+ALTER TABLE public.custom_foods
+  ADD COLUMN IF NOT EXISTS category TEXT NOT NULL DEFAULT 'extras',
+  ADD COLUMN IF NOT EXISTS is_anti_inflammatory BOOLEAN DEFAULT FALSE,
+  ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ DEFAULT NOW();
+
+ALTER TABLE public.ai_reports
+  ADD COLUMN IF NOT EXISTS type TEXT DEFAULT 'weekly';
+
+-- Índices únicos que o app precisa (o upsert de custom_foods usa
+-- onConflict 'user_id,name'; sem isso ele falha). Se já houver linhas
+-- duplicadas, avisa em vez de abortar o script inteiro.
+DO $$
+DECLARE r RECORD;
+BEGIN
+  FOR r IN SELECT * FROM (VALUES
+    ('uq_daily_logs_user_date_type', 'daily_logs',   'user_id, log_date, log_type'),
+    ('uq_meal_logs_user_date_meal',  'meal_logs',    'user_id, log_date, meal_name'),
+    ('uq_custom_foods_user_name',    'custom_foods', 'user_id, name'),
+    ('uq_ai_usage_user_date',        'ai_usage',     'user_id, usage_date')
+  ) AS v(idx, tbl, cols) LOOP
+    BEGIN
+      EXECUTE format('CREATE UNIQUE INDEX IF NOT EXISTS %I ON public.%I (%s)', r.idx, r.tbl, r.cols);
+    EXCEPTION WHEN unique_violation THEN
+      RAISE NOTICE 'Duplicatas em %, índice % não criado — limpe e rode de novo.', r.tbl, r.idx;
+    END;
+  END LOOP;
+END $$;
+
 -- RLS + policy "só os próprios dados" para as tabelas novas
 ALTER TABLE public.daily_logs   ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.meal_logs    ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.custom_foods ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.ai_reports   ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.ai_usage     ENABLE ROW LEVEL SECURITY;
 
 DO $$
 DECLARE t TEXT;
